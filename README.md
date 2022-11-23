@@ -1,12 +1,12 @@
-#ModTester
+# ModTester
+
 ModTester es un framework unificado de pentesting para el protocolo Modbus. 
 En esta herramienta se han intentado recopilado diferentes herramientas para explotar vulnerabilidades. Creando asi un toolkit mas accesible con muchas herramientas diferentes para el mismo protocolo.
 
-##Demo
-
-python modTester.py 
-  _______ 
-<ModTester >
+## How to work
+```
+sudo python modTester.py 
+< ModTester >
  ------- 
            ________                    
 |\   /|	      |      ________         
@@ -18,10 +18,12 @@ python modTester.py
           --=[MODBUS Pentesting Toolkit
        --+--=[Version : 1.0
        --+--=[Modules : 13
-       --+--=[Coder   : Danel Lopez
-          --=[github  : www.github.com/dangoro94
+       --+--=[Coder(s)   : Danel López / Santiago Figueroa
+       --+--=[Mantainer(s)  : Santiago Figueroa / Íñigo Juarrós
+          --=[github  : github.com/dangoro94 / github.com/sfl0r3nz05 / https://github.com/inijuarros
  
 ModTester > help
+
  Command  Description                                      
  -------  -----------                                      
  back     Move back from the current context               
@@ -31,4 +33,5 @@ ModTester > help
  show     Displays modules of a given type, or all modules 
  set      Sets a variable to a value                       
  use      Selects a module by name                         
+```
 
