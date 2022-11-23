@@ -38,4 +38,4 @@ ModTester > help
 ## Documentation (in Spaninsh)
 
 1. [Developer Guide](./documentation/GUIA_DESARROLLO_MODTESTER.pdf)
-2. [Aplication Manual](documentation/documentacion_ModTester.pdf)
+2. [Application Manual](documentation/documentacion_ModTester.pdf)
