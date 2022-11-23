@@ -34,3 +34,8 @@ ModTester > help
  set      Sets a variable to a value                       
  use      Selects a module by name                         
 ```
+
+## Documentation (in Spaninsh)
+
+1. [Developer Guide](./documentation/GUIA_DESARROLLO_MODTESTER.pdf)
+2. [Aplication Manual](documentation/documentacion_ModTester.pdf)
