@@ -63,7 +63,7 @@ class Module:
 			return None
 		self.printLine('[+] Connecting to ' + ip,bcolors.OKGREEN)
 		while True:
-			ans = c.sr1(ModbusADU(transId=getTransId(),unitId=int(self.options['UID'][0]))/ModbusPDU06_Write_Single_Register(registerAddr=int(self.options['RegisterAddr'][0],16),registerValue=int(self.options['RegisterValue'][0],16)),timeout=timeout, verbose=0)
+			ans = c.sr1(ModbusADU(transId=getTransId(),unitId=self.options['UID'][0])/ModbusPDU06_Write_Single_Register(registerAddr=int(self.options['RegisterAddr'][0],16),registerValue=int(self.options['RegisterValue'][0],16)),timeout=timeout, verbose=0)
 			ans = ModbusADU_Answer(str(ans))
 			self.printLine('[+] Response is :',bcolors.OKGREEN)
 			ans.show()

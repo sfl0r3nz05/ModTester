@@ -1,0 +1,6 @@
+{
+  "_comment": "possible attacks: coilDiscover, discover, discreteInputDiscover, getfunc, holdingRegisterDiscover, inputRegisterDiscover, portDiscover, uid, writeSingleCoils, writeSingleCoilsID, writeSingleRegister,writeSingleRegisterID,  floodingAttack",
+  "attacks": ["discover", "writeSingleRegister"],
+  "ips": ["172.21.0.2", "172.21.0.2"],
+  "mode": {}
+}

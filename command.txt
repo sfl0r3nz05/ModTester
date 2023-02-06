@@ -1,0 +1,3 @@
+use ModTester/Application/modules/modbus/scanner/discover
+set RHOSTS 172.21.0.2
+exploit

@@ -1,0 +1,17 @@
+version: "3.3"
+networks:
+   default:
+      external:
+         name: remedy
+services:
+  modtester:
+    build:
+      context: .
+
+  redis:
+   image: redis:6.2-alpine
+   restart: always
+   ports:
+    - '6379:6379'
+   environment:
+    - ALLOW_EMPTY_PASSWORD=yes
