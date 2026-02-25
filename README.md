@@ -272,12 +272,11 @@ After testing, reset device state by restarting the container.
 
 | Document | Language | Link |
 |----------|----------|------|
-| Developer Guide | Spanish | [GUIA_DESARROLLO_MODTESTER.pdf](./documentation/GUIA_DESARROLLO_MODTESTER.pdf) |
+| Developer Guide | Spanish | [Guía_de_desarrollo.pdf](./documentation/GUIA_DESARROLLO_MODTESTER.pdf) |
 | Application Manual | Spanish | [documentacion_ModTester.pdf](./documentation/documentacion_ModTester.pdf) |
 | Attack Demo — URMSIM robot | Video | [attack_sample.mp4](./documentation/attack_sample.mp4) |
 | Attack Demo 2 — URMSIM robot | Video | [attack_sample2.mp4](./documentation/attack_sample2.mp4) |
-| Test Runbook | English | [TEST_RUNBOOK.md](./TEST_RUNBOOK.md) |
-| Integration Guide | English | [README_integration.md](./README_integration.md) |
+| Test Runbook | English | [Test_Runbook.md](./TEST_RUNBOOK.md) |
 
 ---
 
