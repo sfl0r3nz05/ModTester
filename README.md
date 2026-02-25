@@ -37,8 +37,6 @@
 |-----------|---------|
 | Python | 2.7 (primary) |
 | Metasploit Framework | 6.x (`msfconsole` on PATH) |
-| Node.js | 14+ (for report generation) |
-| npm package `docx` | `npm install -g docx` |
 
 Install Metasploit on Ubuntu/Debian:
 
@@ -48,18 +46,6 @@ sudo ./install_metasploit.sh
 ```
 
 Run `msfconsole -q` once interactively to complete first-time setup before using the bridge.
-
----
-
-## Installation
-
-```bash
-git clone https://github.com/sfl0r3nz05/ModTester.git
-cd ModTester
-
-# Install Node.js docx package (required for report generation)
-npm install -g docx
-```
 
 ---
 
@@ -83,8 +69,8 @@ sudo python2 modTester.py
        --+--=[Version  : 1.1
        --+--=[Modules  : 18
        --+--=[Coder(s) : Danel López / Santiago Figueroa
-       --+--=[Maintainer(s) : Santiago Figueroa / Íñigo Juarrós
-          --=[github   : github.com/dangoro94 / github.com/sfl0r3nz05 / github.com/inijuarros
+       --+--=[Maintainer(s) : Santiago Figueroa
+          --=[github   : github.com/dangoro94 / github.com/sfl0r3nz05
 
 ModTester > help
 
@@ -254,16 +240,6 @@ Modbus vulnerabilities are protocol design weaknesses — they have no CVEs. Mod
 | **CVSS v3.1** | Severity scoring | `AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H` → 9.1 Critical |
 | **CWE** | Weakness classification | CWE-306 Missing Authentication for Critical Function |
 | **IEC/ISA 62443** | OT compliance mapping | SR 2.1 Authorization Enforcement |
-
-### Requirements
-
-```bash
-# Node.js must be installed
-node --version   # 14+
-
-# docx npm package
-npm install -g docx
-```
 
 ---
 
