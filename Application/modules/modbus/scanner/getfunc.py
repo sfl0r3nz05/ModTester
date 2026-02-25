@@ -1,4 +1,5 @@
 import os
+import socket
 import threading
 
 from System.Core.Global import *
@@ -61,7 +62,24 @@ class Module:
 			return None
 		self.printLine('[+] Looking for supported function codes on ' + ip,bcolors.OKGREEN)
 		for i in range(0,256): # Total of 127 (legal) function codes
-			ans = c.sr1(ModbusADU(transId=getTransId(),unitId=int(self.options['UID'][0]))/ModbusPDU_Read_Generic(funcCode=i),timeout=timeout, verbose=0)
+
+			# FIX: The server closes the TCP connection after certain FC responses
+			# (error codes, unsupported diagnostics). Catch socket.error(100)
+			# "Underlying stream socket tore down", reconnect, and continue.
+			try:
+				ans = c.sr1(ModbusADU(transId=getTransId(),unitId=int(self.options['UID'][0]))/ModbusPDU_Read_Generic(funcCode=i),timeout=timeout, verbose=0)
+			except socket.error:
+				try:
+					c.close()
+				except Exception:
+					pass
+				c = connectToTarget(ip, self.options['RPORT'][0])
+				if c is None:
+					self.printLine('[-] Reconnect failed at FC ' + str(i) + ', stopping scan.',bcolors.WARNING)
+					break
+				ans = None
+			except Exception:
+				ans = None
 	
 			# We are using the raw data format, because not all function
 			# codes are supported out by this library.
@@ -84,7 +102,3 @@ class Module:
 						
 			else:
 				self.printLine("[+] Function Code "+str(i)+" probably supported.",bcolors.OKGREEN)
-				
-
-		
-		

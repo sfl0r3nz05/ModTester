@@ -1,0 +1,36 @@
+# ── Python compiled files ─────────────────────────────────────────────────────
+*.pyc
+*.pyo
+__pycache__/
+*.py.class
+
+# ── ModTester Output directory ────────────────────────────────────────────────
+# Keep the directory but ignore all generated scan results and reports
+Output/*.txt
+Output/*.docx
+Output/*.pdf
+Output/output
+
+# ── Metasploit temp files ─────────────────────────────────────────────────────
+/tmp/modtester_msf_*.rc
+/tmp/modtester_report_*.js
+
+# ── Node.js ───────────────────────────────────────────────────────────────────
+node_modules/
+
+# ── OS artifacts ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── Editor / IDE ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.code-workspace
+
+# ── Python virtual environments ───────────────────────────────────────────────
+venv/
+.venv/
+env/
