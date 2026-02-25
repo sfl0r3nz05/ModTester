@@ -3,26 +3,18 @@
 """
 ReportGenerator.py  -  System/Core/ReportGenerator.py
 ------------------------------------------------------
-Reads ModTester Output/ files and generates a standardized ICS/OT
-security assessment report.
+Generates a standardised ICS/OT security assessment .docx report from
+ModTester Output/ files. Maps findings to CVSS v3.1, CWE, IEC 62443.
 
-Standardization layers applied per finding (no CVE required):
-  - CVSS v3.1  : Attack Vector / Complexity / Privileges / Impact
-  - CWE        : Common Weakness Enumeration mapping
-  - IEC 62443  : Security Requirement (SR) reference
-  - PTES       : Penetration Testing Execution Standard section
-
-Usage (standalone):
-  python System/Core/ReportGenerator.py \
-      --target 192.168.159.128 \
-      --port 5020 \
-      --assessor "Your Name" \
-      --org "Client Organisation" \
-      --output report.docx
+Zero external dependencies - uses Python 2/3 stdlib only (zipfile + xml).
+No Node.js, no npm, no docx package required.
 
 Usage (from ModTester module):
-  from ReportGenerator import generate_report
-  generate_report(target_ip, port, findings_list, output_path)
+    from ReportGenerator import generate_report
+    generate_report(target_ip, port, output_dir, assessor, organisation, report_path)
+
+Usage (standalone):
+    python System/Core/ReportGenerator.py --target 192.168.159.128 --port 5020
 """
 
 from __future__ import print_function
@@ -30,226 +22,118 @@ from __future__ import print_function
 import os
 import re
 import json
-import subprocess
-import tempfile
+import zipfile
+import io
 from datetime import datetime
 
 # ---------------------------------------------------------------------------
-# Finding catalogue
-# Each entry maps a module/condition to standard references.
-# 'trigger' is matched against Output file names (lowercase).
+# Finding catalogue - triggers matched against Output filename (lowercase)
 # ---------------------------------------------------------------------------
-
 FINDING_CATALOGUE = [
     {
-        "id"          : "F-01",
-        "title"       : "Unauthenticated Modbus Service Accessible",
-        "trigger"     : ["modbusdetect", "modbus discover", "discover"],
-        "description" : (
-            "The Modbus/TCP service is accessible from the network without "
-            "any form of authentication. Any host with TCP connectivity to "
-            "port {port} can issue arbitrary Modbus commands."
-        ),
-        "impact"      : (
-            "An unauthenticated attacker can read process data, modify "
-            "setpoints, and control physical actuators without any credentials."
-        ),
-        "cwe"         : "CWE-306",
-        "cwe_name"    : "Missing Authentication for Critical Function",
-        "cvss_vector" : "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:H",
-        "cvss_score"  : 9.1,
-        "cvss_rating" : "Critical",
-        "iec62443_sr" : "SR 1.1",
+        "id"           : "F-01",
+        "title"        : "Unauthenticated Modbus Service Accessible",
+        "trigger"      : ["modbusdetect", "modbus discover", "discover"],
+        "description"  : "The Modbus/TCP service on port {port} accepts connections and responds to function code requests without any form of authentication. Any host with TCP connectivity can issue arbitrary Modbus commands.",
+        "impact"       : "An unauthenticated attacker can read process data, modify setpoints, and control physical actuators without credentials.",
+        "cwe"          : "CWE-306",
+        "cwe_name"     : "Missing Authentication for Critical Function",
+        "cvss_vector"  : "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:H",
+        "cvss_score"   : 9.1,
+        "cvss_rating"  : "Critical",
+        "iec62443_sr"  : "SR 1.1",
         "iec62443_desc": "Human User Identification and Authentication",
-        "remediation" : (
-            "Deploy Modbus Security (MBAP+TLS, IEC 62351-3) or place the "
-            "device behind a next-generation firewall with application-layer "
-            "Modbus inspection. Implement network segmentation (ISA/IEC 62443 "
-            "Zone & Conduit model) so the device is not directly reachable "
-            "from untrusted segments."
-        ),
+        "remediation"  : "Deploy Modbus Security (MBAP+TLS, IEC 62351-3) or place the device behind a Modbus-aware industrial firewall. Implement network segmentation per ISA/IEC 62443 Zone and Conduit model.",
     },
     {
-        "id"          : "F-02",
-        "title"       : "Device Identity Exposed via FC43 (Read Device Identification)",
-        "trigger"     : ["bannergrabbing", "banner_grabbing"],
-        "description" : (
-            "Function Code 43 (Read Device Identification, MEI Type 0x0E) is "
-            "supported and returns full vendor, product, and firmware version "
-            "information without authentication."
-        ),
-        "impact"      : (
-            "Detailed device identity (vendor, model, firmware revision) "
-            "enables targeted exploit selection and supply-chain attack "
-            "planning. Firmware version exposure may reveal known "
-            "vulnerabilities applicable to the specific revision."
-        ),
-        "cwe"         : "CWE-200",
-        "cwe_name"    : "Exposure of Sensitive Information to an Unauthorized Actor",
-        "cvss_vector" : "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
-        "cvss_score"  : 5.3,
-        "cvss_rating" : "Medium",
-        "iec62443_sr" : "SR 1.1 / SR 7.7",
-        "iec62443_desc": "Human User Identification and Authentication / Least Functionality",
-        "remediation" : (
-            "Disable FC43 support where not operationally required. If the "
-            "device does not allow disabling FC43, restrict access to the "
-            "Modbus port via firewall ACLs to authorised engineering "
-            "workstations only."
-        ),
+        "id"           : "F-02",
+        "title"        : "Device Identity Exposed via FC43 (Read Device Identification)",
+        "trigger"      : ["bannergrabbing", "banner_grabbing"],
+        "description"  : "Function Code 43 (Read Device Identification) returns full vendor, product name, and firmware revision without authentication.",
+        "impact"       : "Device identity (vendor, model, firmware) enables targeted exploit selection. Firmware version exposure may reveal known vulnerabilities.",
+        "cwe"          : "CWE-200",
+        "cwe_name"     : "Exposure of Sensitive Information to an Unauthorized Actor",
+        "cvss_vector"  : "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+        "cvss_score"   : 5.3,
+        "cvss_rating"  : "Medium",
+        "iec62443_sr"  : "SR 1.1 / SR 7.7",
+        "iec62443_desc": "Identification and Authentication / Least Functionality",
+        "remediation"  : "Disable FC43 where not operationally required. If unavoidable, restrict Modbus port access via firewall ACLs to authorised engineering workstations only.",
     },
     {
-        "id"          : "F-03",
-        "title"       : "All Unit IDs (1-254) Respond Without Filtering",
-        "trigger"     : ["findunitid", "modbusuidscane", "brute force uid", "uid"],
-        "description" : (
-            "The device responds to Modbus requests addressed to all Unit IDs "
-            "in the range 1-254. No Unit ID allowlist is enforced."
-        ),
-        "impact"      : (
-            "Unit ID filtering is a weak but intended access-segmentation "
-            "mechanism for multi-drop serial networks bridged to TCP. Its "
-            "absence means an attacker does not need to enumerate the correct "
-            "Unit ID before issuing commands."
-        ),
-        "cwe"         : "CWE-284",
-        "cwe_name"    : "Improper Access Control",
-        "cvss_vector" : "AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
-        "cvss_score"  : 5.3,
-        "cvss_rating" : "Medium",
-        "iec62443_sr" : "SR 2.1",
+        "id"           : "F-03",
+        "title"        : "All Unit IDs (1-254) Respond Without Filtering",
+        "trigger"      : ["findunitid", "brute force uid", "uid"],
+        "description"  : "The device responds to Modbus requests addressed to all Unit IDs in the range 1-254. No Unit ID allowlist is enforced.",
+        "impact"       : "An attacker does not need to enumerate the correct Unit ID before issuing commands, eliminating a weak but intended access-segmentation mechanism.",
+        "cwe"          : "CWE-284",
+        "cwe_name"     : "Improper Access Control",
+        "cvss_vector"  : "AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+        "cvss_score"   : 5.3,
+        "cvss_rating"  : "Medium",
+        "iec62443_sr"  : "SR 2.1",
         "iec62443_desc": "Authorization Enforcement",
-        "remediation" : (
-            "Configure the device or gateway to accept only the specific "
-            "Unit ID(s) assigned during commissioning and return exception "
-            "code 0x04 (Server Failure) or silently drop requests addressed "
-            "to other Unit IDs."
-        ),
+        "remediation"  : "Configure the device or gateway to accept only the specific Unit ID(s) assigned during commissioning and reject all others.",
     },
     {
-        "id"          : "F-04",
-        "title"       : "Unauthenticated Read of All Process Data (FC01/02/03/04)",
-        "trigger"     : ["coildiscover", "holdingregisterdiscover",
-                         "inputregisterdiscover", "discreteinputdiscover",
-                         "coil discover", "holding register discover",
-                         "input register discover", "discrete input",
-                         "read_coils", "read_holding", "read_input",
-                         "read_discrete"],
-        "description" : (
-            "Coil status (FC01), discrete inputs (FC02), holding registers "
-            "(FC03), and input registers (FC04) are all readable without "
-            "authentication, exposing the complete operational state of "
-            "the device."
-        ),
-        "impact"      : (
-            "An attacker gains full situational awareness of the process: "
-            "motor speeds, valve positions, sensor readings, setpoints, and "
-            "counters. This information enables targeted manipulation attacks "
-            "and supports reconnaissance for physical process interference."
-        ),
-        "cwe"         : "CWE-306",
-        "cwe_name"    : "Missing Authentication for Critical Function",
-        "cvss_vector" : "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
-        "cvss_score"  : 7.5,
-        "cvss_rating" : "High",
-        "iec62443_sr" : "SR 2.1",
+        "id"           : "F-04",
+        "title"        : "Unauthenticated Read of All Process Data (FC01/02/03/04)",
+        "trigger"      : ["coildiscover", "holdingregisterdiscover", "inputregisterdiscover",
+                          "discreteinputdiscover", "coil discover", "holding register discover",
+                          "input register discover", "discrete input",
+                          "read_coils", "read_holding", "read_input", "read_discrete",
+                          "get function"],
+        "description"  : "Coil status (FC01), discrete inputs (FC02), holding registers (FC03), and input registers (FC04) are all readable without authentication, exposing the complete operational state of the device.",
+        "impact"       : "An attacker gains full situational awareness of the process: motor speeds, valve positions, sensor readings, setpoints, and counters.",
+        "cwe"          : "CWE-306",
+        "cwe_name"     : "Missing Authentication for Critical Function",
+        "cvss_vector"  : "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+        "cvss_score"   : 7.5,
+        "cvss_rating"  : "High",
+        "iec62443_sr"  : "SR 2.1",
         "iec62443_desc": "Authorization Enforcement",
-        "remediation" : (
-            "Implement read-access controls at the network boundary using a "
-            "Modbus-aware industrial firewall or data diode for read-only "
-            "consumers (SCADA, historians). Apply IEC 62443 Zone & Conduit "
-            "architecture to limit which hosts may query the device."
-        ),
+        "remediation"  : "Implement read-access controls at the network boundary using a Modbus-aware industrial firewall or data diode for read-only consumers.",
     },
     {
-        "id"          : "F-05",
-        "title"       : "Unauthenticated Write to Coils and Registers (FC05/06/15/16)",
-        "trigger"     : ["writesingle", "write single", "write_coil",
-                         "write_register", "write_coils", "write_registers",
-                         "get function"],
-        "description" : (
-            "Write function codes FC05 (Write Single Coil), FC06 (Write "
-            "Single Register), FC15 (Write Multiple Coils), and FC16 (Write "
-            "Multiple Registers) are accepted without authentication. Any "
-            "host with TCP access can arbitrarily modify process setpoints "
-            "and actuator states."
-        ),
-        "impact"      : (
-            "An attacker can: shut down motors and pumps by zeroing coils; "
-            "inject out-of-range setpoints (e.g. motor RPM: 1500 -> 9999) "
-            "that may cause physical damage or process upset; reset counters "
-            "and timers; and perform mass shutdown of all actuators with a "
-            "single FC15 packet. This is the highest-impact Modbus attack "
-            "class and is exploitable by a low-skilled attacker with a "
-            "single off-the-shelf packet."
-        ),
-        "cwe"         : "CWE-306",
-        "cwe_name"    : "Missing Authentication for Critical Function",
-        "cvss_vector" : "AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H",
-        "cvss_score"  : 9.1,
-        "cvss_rating" : "Critical",
-        "iec62443_sr" : "SR 2.1",
+        "id"           : "F-05",
+        "title"        : "Unauthenticated Write to Coils and Registers (FC05/06/15/16)",
+        "trigger"      : ["writesingle", "write single", "write_coil",
+                          "write_register", "write_coils", "write_registers"],
+        "description"  : "Write function codes FC05, FC06, FC15, and FC16 are accepted without authentication. Any host with TCP access can arbitrarily modify process setpoints and actuator states.",
+        "impact"       : "An attacker can shut down motors by zeroing coils, inject out-of-range setpoints (e.g. RPM 1500 to 9999), reset counters, or perform mass shutdown of all actuators with a single FC15 packet.",
+        "cwe"          : "CWE-306",
+        "cwe_name"     : "Missing Authentication for Critical Function",
+        "cvss_vector"  : "AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H",
+        "cvss_score"   : 9.1,
+        "cvss_rating"  : "Critical",
+        "iec62443_sr"  : "SR 2.1",
         "iec62443_desc": "Authorization Enforcement",
-        "remediation" : (
-            "This is the fundamental Modbus protocol limitation. Mitigations "
-            "in priority order: (1) Deploy Modbus Security / MBAP+TLS "
-            "(IEC 62351-3) if the device supports it. (2) Use a Modbus-aware "
-            "industrial firewall to whitelist only the specific function codes, "
-            "address ranges, and source IPs needed for normal operation. "
-            "(3) Implement OPC-UA with security profiles as a replacement "
-            "protocol for new deployments. (4) Network segmentation as a "
-            "defence-in-depth measure."
-        ),
+        "remediation"  : "Priority order: (1) Deploy Modbus Security/MBAP+TLS if supported. (2) Use a Modbus-aware firewall to whitelist specific function codes, address ranges, and source IPs. (3) Network segmentation as defence-in-depth.",
     },
     {
-        "id"          : "F-06",
-        "title"       : "No Rate Limiting — Susceptible to Denial of Service (Flooding)",
-        "trigger"     : ["flooding", "floodingattack"],
-        "description" : (
-            "The Modbus/TCP service does not enforce connection rate limits "
-            "or request throttling. A flooding attack saturates the service, "
-            "causing legitimate SCADA/HMI systems to lose communication."
-        ),
-        "impact"      : (
-            "Loss of visibility and control for operators. In a process where "
-            "the PLC/RTU relies on SCADA polling for supervisory setpoints, "
-            "a sustained flood causes the controller to operate on its last "
-            "known state or enter a fail-safe mode, which may itself be "
-            "unsafe depending on the process."
-        ),
-        "cwe"         : "CWE-400",
-        "cwe_name"    : "Uncontrolled Resource Consumption",
-        "cvss_vector" : "AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
-        "cvss_score"  : 7.5,
-        "cvss_rating" : "High",
-        "iec62443_sr" : "SR 7.2",
+        "id"           : "F-06",
+        "title"        : "No Rate Limiting - Susceptible to Denial of Service",
+        "trigger"      : ["flooding", "floodingattack"],
+        "description"  : "The Modbus/TCP service does not enforce connection rate limits or request throttling. A flooding attack saturates the service, causing legitimate SCADA/HMI systems to lose communication.",
+        "impact"       : "Loss of visibility and control for operators. The controller may operate on last-known state or enter fail-safe mode, which may itself be unsafe depending on the process.",
+        "cwe"          : "CWE-400",
+        "cwe_name"     : "Uncontrolled Resource Consumption",
+        "cvss_vector"  : "AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+        "cvss_score"   : 7.5,
+        "cvss_rating"  : "High",
+        "iec62443_sr"  : "SR 7.2",
         "iec62443_desc": "Resource Management",
-        "remediation" : (
-            "Enforce TCP connection limits and Modbus request rate limits at "
-            "the network boundary (industrial firewall or switch ACL). "
-            "Consider dedicated Modbus-to-secure-protocol gateways that "
-            "absorb floods before they reach the field device."
-        ),
+        "remediation"  : "Enforce TCP connection limits and Modbus request rate limits at the network boundary via industrial firewall or switch ACL.",
     },
 ]
 
-# ---------------------------------------------------------------------------
-# CVSS colour mapping (used in the docx report)
-# ---------------------------------------------------------------------------
-SEVERITY_COLOURS = {
-    "Critical" : "C00000",  # dark red
-    "High"     : "E26B0A",  # orange
-    "Medium"   : "F0D000",  # yellow
-    "Low"      : "70AD47",  # green
-    "Info"     : "4472C4",  # blue
-}
+SEVERITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Output directory scanning and finding matching
 # ---------------------------------------------------------------------------
 
 def _scan_output_dir(output_dir):
-    """Return list of (filename_lower, full_path) for all .txt files in Output/."""
     found = []
     if not os.path.isdir(output_dir):
         return found
@@ -260,53 +144,398 @@ def _scan_output_dir(output_dir):
 
 
 def _match_findings(output_files, target_ip, port):
-    """
-    Match output files against FINDING_CATALOGUE triggers.
-    Returns list of finding dicts, each enriched with:
-      - evidence_file : path to the output file that triggered it
-      - evidence_snippet : first 20 relevant lines from the file
-    """
     matched = []
     seen_ids = set()
-
     for fname_lower, fpath in output_files:
         for finding in FINDING_CATALOGUE:
             if finding["id"] in seen_ids:
                 continue
             for trigger in finding["trigger"]:
                 if trigger in fname_lower:
-                    # Read evidence snippet
                     snippet = ""
                     try:
                         with open(fpath, 'r') as f:
-                            lines = [l.rstrip() for l in f.readlines()]
-                            # Strip ANSI from evidence
-                            ansi_re = re.compile(r'\x1b\[[0-9;]*[mABCDEFGHJKSTfnsulhp]')
-                            clean = [ansi_re.sub('', l) for l in lines]
-                            snippet = "\n".join(clean[:30])
+                            raw = f.read(2000)
+                        ansi_re = re.compile(r'\x1b\[[0-9;]*[mABCDEFGHJKSTfnsulhp]')
+                        snippet = ansi_re.sub('', raw).strip()
                     except Exception:
                         snippet = "(unable to read evidence file)"
-
                     f_copy = dict(finding)
-                    f_copy["description"] = finding["description"].format(port=port)
+                    f_copy["description"] = finding["description"].replace("{port}", str(port))
                     f_copy["evidence_file"]    = fpath
-                    f_copy["evidence_snippet"] = snippet
+                    f_copy["evidence_snippet"] = snippet[:600]
                     matched.append(f_copy)
                     seen_ids.add(finding["id"])
                     break
-
-    # Sort by CVSS score descending
-    matched.sort(key=lambda x: x["cvss_score"], reverse=True)
+    matched.sort(key=lambda x: SEVERITY_ORDER.get(x["cvss_rating"], 99))
     return matched
 
 
+# ---------------------------------------------------------------------------
+# Pure Python .docx generation (stdlib zipfile only - no Node.js required)
+# ---------------------------------------------------------------------------
+
+def _esc(text):
+    """XML-escape a plain text string."""
+    if not isinstance(text, str):
+        try:
+            text = text.encode('ascii', 'replace').decode('ascii')
+        except Exception:
+            text = str(text)
+    text = text.replace('&', '&amp;')
+    text = text.replace('<', '&lt;')
+    text = text.replace('>', '&gt;')
+    text = text.replace('"', '&quot;')
+    return text
+
+
+def _para(text, style=None, bold=False, size=None, colour=None, align=None):
+    """Build a <w:p> XML element."""
+    parts = ['<w:p>']
+    pPr = []
+    if style:
+        pPr.append('<w:pStyle w:val="{}"/>'.format(style))
+    if align:
+        pPr.append('<w:jc w:val="{}"/>'.format(align))
+    if pPr:
+        parts.append('<w:pPr>' + ''.join(pPr) + '</w:pPr>')
+    if text:
+        rPr = []
+        if bold:
+            rPr.append('<w:b/>')
+        if size:
+            rPr.append('<w:sz w:val="{}"/>'.format(size))
+            rPr.append('<w:szCs w:val="{}"/>'.format(size))
+        if colour:
+            rPr.append('<w:color w:val="{}"/>'.format(colour))
+        rPr_xml = ('<w:rPr>' + ''.join(rPr) + '</w:rPr>') if rPr else ''
+        # Split on newlines to preserve line breaks
+        lines = _esc(text).split('\n')
+        for i, line in enumerate(lines):
+            parts.append('<w:r>{}<w:t xml:space="preserve">{}</w:t></w:r>'.format(rPr_xml, line))
+            if i < len(lines) - 1:
+                parts.append('<w:r><w:br/></w:r>')
+    parts.append('</w:p>')
+    return ''.join(parts)
+
+
+def _table_row(cells, header=False, shade=None):
+    """Build a <w:tr> element. cells = list of (text, width_dxa, opts_dict)."""
+    parts = ['<w:tr>']
+    if header:
+        parts.append('<w:trPr><w:tblHeader/></w:trPr>')
+    for text, width, opts in cells:
+        opts = opts or {}
+        parts.append('<w:tc>')
+        parts.append('<w:tcPr>')
+        parts.append('<w:tcW w:w="{}" w:type="dxa"/>'.format(width))
+        fill = opts.get('fill', shade or 'FFFFFF')
+        parts.append('<w:shd w:val="clear" w:color="auto" w:fill="{}"/>'.format(fill))
+        parts.append('<w:tcMar><w:top w:w="80" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:left w:w="120" w:type="dxa"/><w:right w:w="120" w:type="dxa"/></w:tcMar>')
+        parts.append('</w:tcPr>')
+        colour  = opts.get('colour', 'FFFFFF' if fill not in ('FFFFFF', 'D9E1F2', 'F2F2F2', 'EBF3FB') else '000000')
+        bold    = opts.get('bold', header)
+        size    = opts.get('size', 18)
+        align   = opts.get('align', None)
+        parts.append(_para(str(text), bold=bold, size=size, colour=colour, align=align))
+        parts.append('</w:tc>')
+    parts.append('</w:tr>')
+    return ''.join(parts)
+
+
+SEVERITY_COLOUR = {
+    "Critical": "C00000",
+    "High":     "E26B0A",
+    "Medium":   "BF8F00",
+    "Low":      "375623",
+    "Info":     "1F4E79",
+}
+
+HDR_BLUE  = "1F4E79"
+ALT_ROW   = "D9E1F2"
+HDR_TEXT  = "FFFFFF"
+
+
+def _build_document_xml(target_ip, port, findings, assessor, organisation, date_str, ts_str):
+    NS = ('xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" '
+          'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+          'xmlns:o="urn:schemas-microsoft-com:office:office" '
+          'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+          'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" '
+          'xmlns:v="urn:schemas-microsoft-com:vml" '
+          'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+          'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+          'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" '
+          'xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" '
+          'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"')
+
+    W = 9026  # A4 content width in DXA (1" margins)
+
+    crit  = sum(1 for f in findings if f['cvss_rating'] == 'Critical')
+    high  = sum(1 for f in findings if f['cvss_rating'] == 'High')
+    med   = sum(1 for f in findings if f['cvss_rating'] == 'Medium')
+    total = len(findings)
+
+    body = []
+
+    # ---- COVER PAGE --------------------------------------------------------
+    body.append(_para('ICS / OT Security Assessment Report',
+                      bold=True, size=52, colour=HDR_BLUE, align='center'))
+    body.append(_para('Modbus Protocol Security Evaluation',
+                      size=28, colour='444444', align='center'))
+    body.append(_para('', size=20))
+    body.append(_para('Target: {}:{}'.format(target_ip, port),
+                      bold=True, size=28, colour=HDR_BLUE, align='center'))
+    body.append(_para('Organisation: {}'.format(organisation), size=22, align='center'))
+    body.append(_para('Assessor: {}'.format(assessor), size=22, align='center'))
+    body.append(_para('Date: {}'.format(date_str), size=22, align='center'))
+    body.append(_para('', size=20))
+
+    # Summary boxes as a table
+    qw = W // 4
+    body.append('<w:tbl><w:tblPr><w:tblW w:w="{}" w:type="dxa"/></w:tblPr><w:tblGrid>{}</w:tblGrid>'.format(
+        W, '<w:gridCol w:w="{}"/>'.format(qw) * 4))
+    body.append(_table_row([
+        ('{} CRITICAL'.format(crit), qw, {'fill': 'C00000', 'colour': 'FFFFFF', 'bold': True, 'size': 28}),
+        ('{} HIGH'.format(high),     qw, {'fill': 'E26B0A', 'colour': 'FFFFFF', 'bold': True, 'size': 28}),
+        ('{} MEDIUM'.format(med),    qw, {'fill': 'BF8F00', 'colour': 'FFFFFF', 'bold': True, 'size': 28}),
+        ('{} TOTAL'.format(total),   qw, {'fill': '595959', 'colour': 'FFFFFF', 'bold': True, 'size': 28}),
+    ]))
+    body.append('</w:tbl>')
+
+    # Page break
+    body.append('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
+
+    # ---- EXECUTIVE SUMMARY -------------------------------------------------
+    body.append(_para('1. Executive Summary', style='Heading1'))
+    body.append(_para(
+        'This report presents the results of a Modbus protocol security assessment '
+        'conducted against {}:{}. Testing was performed using ModTester '
+        '(github.com/sfl0r3nz05/ModTester) integrated with Metasploit Framework '
+        'SCADA auxiliary modules on {}.'.format(target_ip, port, date_str)))
+    body.append(_para(
+        'Modbus is a protocol designed in 1979 without authentication, encryption, '
+        'or access control. The {} finding(s) documented here represent the inherent '
+        'risk of operating this protocol in its default configuration on a TCP network. '
+        '{} are rated Critical (CVSS >= 9.0), {} High, and {} Medium. No CVE identifiers '
+        'are assigned as these are protocol-level design weaknesses; findings are mapped '
+        'to CWE and IEC/ISA 62443 Security Requirements.'.format(total, crit, high, med)))
+
+    # ---- SCOPE -------------------------------------------------------------
+    body.append(_para('2. Assessment Scope', style='Heading1'))
+    cw1, cw2 = 2800, W - 2800
+    body.append('<w:tbl><w:tblPr><w:tblW w:w="{}" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="{}"/><w:gridCol w:w="{}"/></w:tblGrid>'.format(W, cw1, cw2))
+    body.append(_table_row([('Parameter', cw1, {'fill': HDR_BLUE, 'colour': HDR_TEXT}), ('Value', cw2, {'fill': HDR_BLUE, 'colour': HDR_TEXT})], header=True))
+    scope_rows = [
+        ('Target IP',       target_ip),
+        ('Target Port',     '{} / TCP (Modbus/TCP)'.format(port)),
+        ('Protocol',        'Modbus/TCP (MBAP framing)'),
+        ('Assessment Date', date_str),
+        ('Assessor',        assessor),
+        ('Organisation',    organisation),
+        ('Tool',            'ModTester v1.1 + Metasploit Framework 6.4'),
+    ]
+    for i, (k, v) in enumerate(scope_rows):
+        shade = ALT_ROW if i % 2 == 0 else 'FFFFFF'
+        body.append(_table_row([(k, cw1, {'fill': shade}), (v, cw2, {'fill': shade})]))
+    body.append('</w:tbl>')
+
+    # ---- FINDINGS SUMMARY --------------------------------------------------
+    body.append(_para('', size=20))
+    body.append(_para('3. Findings Summary', style='Heading1'))
+    col_w = [500, 4226, 1000, 1000, 1300]
+    body.append('<w:tbl><w:tblPr><w:tblW w:w="{}" w:type="dxa"/></w:tblPr><w:tblGrid>{}</w:tblGrid>'.format(
+        W, ''.join('<w:gridCol w:w="{}"/>'.format(c) for c in col_w)))
+    body.append(_table_row([
+        ('ID',       col_w[0], {'fill': HDR_BLUE, 'colour': HDR_TEXT}),
+        ('Title',    col_w[1], {'fill': HDR_BLUE, 'colour': HDR_TEXT}),
+        ('CVSS',     col_w[2], {'fill': HDR_BLUE, 'colour': HDR_TEXT}),
+        ('Severity', col_w[3], {'fill': HDR_BLUE, 'colour': HDR_TEXT}),
+        ('IEC 62443',col_w[4], {'fill': HDR_BLUE, 'colour': HDR_TEXT}),
+    ], header=True))
+    for i, f in enumerate(findings):
+        shade = ALT_ROW if i % 2 == 0 else 'FFFFFF'
+        sc    = SEVERITY_COLOUR.get(f['cvss_rating'], '888888')
+        body.append(_table_row([
+            (f['id'],           col_w[0], {'fill': shade}),
+            (f['title'],        col_w[1], {'fill': shade}),
+            (str(f['cvss_score']), col_w[2], {'fill': shade, 'colour': sc, 'bold': True}),
+            (f['cvss_rating'],  col_w[3], {'fill': sc, 'colour': 'FFFFFF', 'bold': True}),
+            (f['iec62443_sr'],  col_w[4], {'fill': shade}),
+        ]))
+    body.append('</w:tbl>')
+
+    body.append('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
+
+    # ---- DETAILED FINDINGS -------------------------------------------------
+    body.append(_para('4. Detailed Findings', style='Heading1'))
+
+    for f in findings:
+        sc = SEVERITY_COLOUR.get(f['cvss_rating'], '888888')
+        body.append(_para('{} - {}'.format(f['id'], f['title']), style='Heading2'))
+
+        # References table
+        rw = W // 4
+        body.append('<w:tbl><w:tblPr><w:tblW w:w="{}" w:type="dxa"/></w:tblPr><w:tblGrid>{}</w:tblGrid>'.format(
+            W, '<w:gridCol w:w="{}"/>'.format(rw) * 4))
+        body.append(_table_row([
+            ('CVSS v3.1',  rw, {'fill': HDR_BLUE, 'colour': HDR_TEXT}),
+            ('CWE',        rw, {'fill': HDR_BLUE, 'colour': HDR_TEXT}),
+            ('IEC 62443',  rw, {'fill': HDR_BLUE, 'colour': HDR_TEXT}),
+            ('Vector',     rw, {'fill': HDR_BLUE, 'colour': HDR_TEXT}),
+        ], header=True))
+        body.append(_table_row([
+            ('{} ({})'.format(f['cvss_score'], f['cvss_rating']), rw, {'fill': sc, 'colour': 'FFFFFF', 'bold': True, 'size': 22}),
+            ('{}\n{}'.format(f['cwe'], f['cwe_name']), rw, {}),
+            ('{}\n{}'.format(f['iec62443_sr'], f['iec62443_desc']), rw, {}),
+            (f['cvss_vector'], rw, {'size': 16}),
+        ]))
+        body.append('</w:tbl>')
+
+        body.append(_para('Description', bold=True))
+        body.append(_para(f['description']))
+        body.append(_para('Impact', bold=True))
+        body.append(_para(f['impact']))
+        body.append(_para('Remediation', bold=True))
+        body.append(_para(f['remediation']))
+
+        # Evidence
+        body.append(_para('Evidence', bold=True))
+        snippet = f.get('evidence_snippet', '').strip()
+        if snippet:
+            # Evidence in a shaded box
+            body.append('<w:tbl><w:tblPr><w:tblW w:w="{}" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="{}"/></w:tblGrid>'.format(W, W))
+            body.append('<w:tr><w:tc><w:tcPr><w:tcW w:w="{}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/><w:tcMar><w:top w:w="80" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:left w:w="120" w:type="dxa"/><w:right w:w="120" w:type="dxa"/></w:tcMar></w:tcPr>'.format(W))
+            lines = _esc(snippet).split('\n')
+            for line in lines[:20]:
+                body.append('<w:p><w:pPr><w:pStyle w:val="Code"/></w:pPr><w:r><w:rPr><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr><w:t xml:space="preserve">{}</w:t></w:r></w:p>'.format(line))
+            body.append('</w:tc></w:tr></w:tbl>')
+        body.append(_para('', size=20))
+
+    # ---- APPENDIX ----------------------------------------------------------
+    body.append(_para('5. Methodology', style='Heading1'))
+    for phase in [
+        'Phase 1 - Discovery: modbusdetect, portDiscover, discover',
+        'Phase 2 - Fingerprinting: modbus_banner_grabbing (FC43)',
+        'Phase 3 - Enumeration: modbus_findunitid, uid (UID brute-force), getfunc',
+        'Phase 4 - Register Read: coilDiscover, holdingRegisterDiscover, inputRegisterDiscover',
+        'Phase 5 - Write Exploitation: writeSingleCoils, writeSingleRegister, modbusclient (FC05/06/15/16)',
+        'Phase 6 - Denial of Service: floodingAttack',
+    ]:
+        body.append(_para(phase))
+
+    body.append(_para('6. References', style='Heading1'))
+    for ref in [
+        'Modbus Application Protocol Specification v1.1b3 - modbus.org',
+        'IEC 62443-3-3:2013 - System security requirements and security levels',
+        'MITRE CWE - https://cwe.mitre.org',
+        'CVSS v3.1 Specification - https://www.first.org/cvss/v3.1/specification-document',
+        'ModTester - https://github.com/sfl0r3nz05/ModTester',
+        'Metasploit SCADA Modules - https://github.com/rapid7/metasploit-framework',
+    ]:
+        body.append(_para(ref))
+
+    body.append(_para('Generated by ModTester ReportGenerator on {}'.format(ts_str),
+                      size=16, colour='888888'))
+
+    doc_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document {ns}>'
+        '<w:body>'
+        '{body}'
+        '<w:sectPr>'
+        '<w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>'
+        '</w:sectPr>'
+        '</w:body>'
+        '</w:document>'
+    ).format(ns=NS, body=''.join(body))
+
+    return doc_xml
+
+
+def _build_styles_xml():
+    return '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault><w:rPr>
+      <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
+      <w:sz w:val="20"/><w:szCs w:val="20"/>
+    </w:rPr></w:rPrDefault>
+  </w:docDefaults>
+  <w:style w:type="paragraph" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+    <w:pPr><w:spacing w:after="120"/></w:pPr>
+    <w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1">
+    <w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>
+    <w:pPr><w:spacing w:before="320" w:after="160"/><w:outlineLvl w:val="0"/></w:pPr>
+    <w:rPr><w:b/><w:color w:val="1F4E79"/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Heading2">
+    <w:name w:val="heading 2"/><w:basedOn w:val="Normal"/>
+    <w:pPr><w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="1"/></w:pPr>
+    <w:rPr><w:b/><w:color w:val="2E4057"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Code">
+    <w:name w:val="Code"/><w:basedOn w:val="Normal"/>
+    <w:pPr><w:spacing w:after="0"/></w:pPr>
+    <w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:cs="Courier New"/><w:sz w:val="16"/></w:rPr>
+  </w:style>
+</w:styles>'''
+
+
+def _write_docx_pure(target_ip, port, findings, assessor, organisation, out_path):
+    """Write the .docx using stdlib zipfile only. No Node.js required."""
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    ts_str   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    doc_xml    = _build_document_xml(target_ip, port, findings, assessor, organisation, date_str, ts_str)
+    styles_xml = _build_styles_xml()
+
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml"  ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        '<Override PartName="/word/styles.xml"   ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+        '</Types>'
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+        '</Relationships>'
+    )
+    word_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+        '</Relationships>'
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('[Content_Types].xml', content_types.encode('utf-8'))
+        zf.writestr('_rels/.rels',                rels.encode('utf-8'))
+        zf.writestr('word/_rels/document.xml.rels', word_rels.encode('utf-8'))
+        zf.writestr('word/document.xml',           doc_xml.encode('utf-8'))
+        zf.writestr('word/styles.xml',             styles_xml.encode('utf-8'))
+
+    with open(out_path, 'wb') as f:
+        f.write(buf.getvalue())
+
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def generate_report(target_ip, port, output_dir, assessor="ModTester",
-                    organisation="Target Organisation",
-                    report_path=None):
-    """
-    Main entry point. Scans output_dir, matches findings, writes .docx report.
-    Returns path to the generated report.
-    """
+                    organisation="Target Organisation", report_path=None):
     if report_path is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = os.path.join(
@@ -320,555 +549,20 @@ def generate_report(target_ip, port, output_dir, assessor="ModTester",
     print("[Report] {} finding(s) matched from {} output file(s).".format(
         len(findings), len(output_files)))
 
-    _write_docx(target_ip, port, findings, assessor, organisation, report_path)
-    return report_path
-
-
-def _write_docx(target_ip, port, findings, assessor, organisation, out_path):
-    """Generate the .docx report using docx-js via Node.js subprocess."""
-
-    # Serialise findings to JSON for the JS script
-    findings_json = json.dumps(findings, ensure_ascii=True)
-    date_str      = datetime.now().strftime("%Y-%m-%d")
-    ts_str        = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    js_script = r"""
-'use strict';
-const fs   = require('fs');
-const path = require('path');
-const {
-  Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
-  HeadingLevel, AlignmentType, BorderStyle, WidthType, ShadingType,
-  VerticalAlign, PageNumber, PageBreak, LevelFormat, Header, Footer,
-  TabStopType, TabStopPosition
-} = require('docx');
-
-// -- Data injected from Python ------------------------------------------------
-const TARGET_IP    = """ + json.dumps(target_ip) + r""";
-const TARGET_PORT  = """ + json.dumps(str(port)) + r""";
-const ASSESSOR     = """ + json.dumps(assessor) + r""";
-const ORGANISATION = """ + json.dumps(organisation) + r""";
-const DATE_STR     = """ + json.dumps(date_str) + r""";
-const TS_STR       = """ + json.dumps(ts_str) + r""";
-const FINDINGS     = """ + findings_json + r""";
-const OUT_PATH     = """ + json.dumps(out_path) + r""";
-
-// -- Colours ------------------------------------------------------------------
-const COLOURS = {
-  Critical : 'C00000',
-  High     : 'E26B0A',
-  Medium   : 'BF8F00',
-  Low      : '375623',
-  Info     : '1F4E79',
-  header   : '1F4E79',
-  hdrText  : 'FFFFFF',
-  altRow   : 'D9E1F2',
-  border   : 'B8CCE4',
-};
-
-// -- Helpers ------------------------------------------------------------------
-const W = 9360; // content width DXA (A4, 1" margins)
-
-function cellBorder(colour) {
-  const b = { style: BorderStyle.SINGLE, size: 1, color: colour };
-  return { top: b, bottom: b, left: b, right: b };
-}
-
-function hdrCell(text, widthDxa) {
-  return new TableCell({
-    width: { size: widthDxa, type: WidthType.DXA },
-    borders: cellBorder(COLOURS.border),
-    shading: { fill: COLOURS.header, type: ShadingType.CLEAR },
-    margins: { top: 80, bottom: 80, left: 120, right: 120 },
-    children: [new Paragraph({
-      children: [new TextRun({ text, bold: true, color: COLOURS.hdrText, size: 18, font: 'Arial' })]
-    })]
-  });
-}
-
-function dataCell(text, widthDxa, opts) {
-  opts = opts || {};
-  return new TableCell({
-    width: { size: widthDxa, type: WidthType.DXA },
-    borders: cellBorder(COLOURS.border),
-    shading: opts.fill ? { fill: opts.fill, type: ShadingType.CLEAR } : undefined,
-    margins: { top: 80, bottom: 80, left: 120, right: 120 },
-    verticalAlign: opts.vAlign || VerticalAlign.TOP,
-    children: [new Paragraph({
-      children: [new TextRun({
-        text: String(text),
-        bold: !!opts.bold,
-        color: opts.color || '000000',
-        size: opts.size || 18,
-        font: 'Arial',
-      })]
-    })]
-  });
-}
-
-function para(text, opts) {
-  opts = opts || {};
-  return new Paragraph({
-    heading: opts.heading,
-    spacing: { before: opts.spaceBefore || 120, after: opts.spaceAfter || 120 },
-    children: [new TextRun({
-      text,
-      bold: !!opts.bold,
-      size: opts.size || 20,
-      font: 'Arial',
-      color: opts.color || '000000',
-      italics: !!opts.italics,
-    })]
-  });
-}
-
-function sectionHeading(text) {
-  return new Paragraph({
-    heading: HeadingLevel.HEADING_1,
-    spacing: { before: 320, after: 160 },
-    children: [new TextRun({ text, bold: true, size: 28, font: 'Arial', color: COLOURS.header })]
-  });
-}
-
-function subHeading(text) {
-  return new Paragraph({
-    heading: HeadingLevel.HEADING_2,
-    spacing: { before: 240, after: 100 },
-    children: [new TextRun({ text, bold: true, size: 22, font: 'Arial', color: '2E4057' })]
-  });
-}
-
-function hr() {
-  return new Paragraph({
-    border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: COLOURS.border, space: 1 } },
-    spacing: { before: 0, after: 160 },
-    children: []
-  });
-}
-
-function labelValue(label, value) {
-  return new Paragraph({
-    spacing: { before: 60, after: 60 },
-    children: [
-      new TextRun({ text: label + ': ', bold: true, size: 18, font: 'Arial' }),
-      new TextRun({ text: String(value), size: 18, font: 'Arial' }),
-    ]
-  });
-}
-
-function severityBadge(rating) {
-  const colour = COLOURS[rating] || '888888';
-  return new TableCell({
-    width: { size: 1400, type: WidthType.DXA },
-    borders: cellBorder(COLOURS.border),
-    shading: { fill: colour, type: ShadingType.CLEAR },
-    margins: { top: 80, bottom: 80, left: 120, right: 120 },
-    verticalAlign: VerticalAlign.CENTER,
-    children: [new Paragraph({
-      alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: rating.toUpperCase(), bold: true, color: 'FFFFFF', size: 18, font: 'Arial' })]
-    })]
-  });
-}
-
-// -- Summary table ---------------------------------------------------------
-function buildSummaryTable(findings) {
-  const colW = [500, 4560, 1400, 1400, 1500];
-  const hdrRow = new TableRow({
-    tableHeader: true,
-    children: [
-      hdrCell('ID',       colW[0]),
-      hdrCell('Title',    colW[1]),
-      hdrCell('CVSS',     colW[2]),
-      hdrCell('Severity', colW[3]),
-      hdrCell('IEC 62443',colW[4]),
-    ]
-  });
-
-  const rows = findings.map((f, i) => {
-    const fill = i % 2 === 1 ? COLOURS.altRow : 'FFFFFF';
-    const sc   = COLOURS[f.cvss_rating] || '888888';
-    return new TableRow({
-      children: [
-        dataCell(f.id,           colW[0], { fill }),
-        dataCell(f.title,        colW[1], { fill }),
-        new TableCell({
-          width: { size: colW[2], type: WidthType.DXA },
-          borders: cellBorder(COLOURS.border),
-          shading: { fill, type: ShadingType.CLEAR },
-          margins: { top: 80, bottom: 80, left: 120, right: 120 },
-          children: [new Paragraph({
-            children: [new TextRun({ text: String(f.cvss_score), bold: true, color: sc, size: 18, font: 'Arial' })]
-          })]
-        }),
-        new TableCell({
-          width: { size: colW[3], type: WidthType.DXA },
-          borders: cellBorder(COLOURS.border),
-          shading: { fill: sc, type: ShadingType.CLEAR },
-          margins: { top: 80, bottom: 80, left: 120, right: 120 },
-          children: [new Paragraph({
-            alignment: AlignmentType.CENTER,
-            children: [new TextRun({ text: f.cvss_rating.toUpperCase(), bold: true, color: 'FFFFFF', size: 16, font: 'Arial' })]
-          })]
-        }),
-        dataCell(f.iec62443_sr,  colW[4], { fill }),
-      ]
-    });
-  });
-
-  return new Table({
-    width: { size: W, type: WidthType.DXA },
-    columnWidths: colW,
-    rows: [hdrRow, ...rows],
-  });
-}
-
-// -- Individual finding block ----------------------------------------------
-function buildFindingBlock(f) {
-  const sc = COLOURS[f.cvss_rating] || '888888';
-
-  // References table
-  const refColW = [2200, 2200, 2200, 2760];
-  const refTable = new Table({
-    width: { size: W, type: WidthType.DXA },
-    columnWidths: refColW,
-    rows: [
-      new TableRow({
-        tableHeader: true,
-        children: [
-          hdrCell('CVSS v3.1 Score', refColW[0]),
-          hdrCell('CWE', refColW[1]),
-          hdrCell('IEC 62443 SR', refColW[2]),
-          hdrCell('CVSS Vector', refColW[3]),
-        ]
-      }),
-      new TableRow({
-        children: [
-          new TableCell({
-            width: { size: refColW[0], type: WidthType.DXA },
-            borders: cellBorder(COLOURS.border),
-            shading: { fill: sc, type: ShadingType.CLEAR },
-            margins: { top: 80, bottom: 80, left: 120, right: 120 },
-            children: [new Paragraph({
-              alignment: AlignmentType.CENTER,
-              children: [new TextRun({ text: String(f.cvss_score) + ' ' + f.cvss_rating, bold: true, color: 'FFFFFF', size: 22, font: 'Arial' })]
-            })]
-          }),
-          dataCell(f.cwe + '\n' + f.cwe_name, refColW[1], {}),
-          dataCell(f.iec62443_sr + '\n' + f.iec62443_desc, refColW[2], {}),
-          dataCell(f.cvss_vector, refColW[3], { size: 16 }),
-        ]
-      })
-    ]
-  });
-
-  // Evidence snippet table
-  const evidenceTable = new Table({
-    width: { size: W, type: WidthType.DXA },
-    columnWidths: [W],
-    rows: [
-      new TableRow({
-        tableHeader: true,
-        children: [hdrCell('Evidence (ModTester Output)', W)]
-      }),
-      new TableRow({
-        children: [new TableCell({
-          width: { size: W, type: WidthType.DXA },
-          borders: cellBorder(COLOURS.border),
-          shading: { fill: 'F2F2F2', type: ShadingType.CLEAR },
-          margins: { top: 80, bottom: 80, left: 120, right: 120 },
-          children: [new Paragraph({
-            children: [new TextRun({
-              text: (f.evidence_snippet || '').substring(0, 800),
-              size: 16, font: 'Courier New', color: '333333'
-            })]
-          })]
-        })]
-      })
-    ]
-  });
-
-  return [
-    subHeading(f.id + '  ' + f.title),
-    para('Description', { bold: true }),
-    para(f.description),
-    para('Impact', { bold: true }),
-    para(f.impact),
-    refTable,
-    new Paragraph({ spacing: { before: 120, after: 120 }, children: [] }),
-    para('Remediation', { bold: true }),
-    para(f.remediation),
-    new Paragraph({ spacing: { before: 80, after: 80 }, children: [] }),
-    evidenceTable,
-    new Paragraph({ spacing: { before: 200, after: 200 }, children: [] }),
-    hr(),
-  ];
-}
-
-// -- Cover page -----------------------------------------------------------
-function buildCoverPage(findings) {
-  const critCount = findings.filter(f => f.cvss_rating === 'Critical').length;
-  const highCount = findings.filter(f => f.cvss_rating === 'High').length;
-  const medCount  = findings.filter(f => f.cvss_rating === 'Medium').length;
-
-  return [
-    new Paragraph({ spacing: { before: 2000, after: 400 }, children: [
-      new TextRun({ text: 'ICS / OT Security Assessment Report', bold: true, size: 52, font: 'Arial', color: COLOURS.header })
-    ], alignment: AlignmentType.CENTER }),
-    new Paragraph({ spacing: { before: 0, after: 200 }, alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: 'Modbus Protocol Security Evaluation', size: 28, font: 'Arial', color: '444444' })]
-    }),
-    hr(),
-    new Paragraph({ spacing: { before: 400, after: 100 }, alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: 'Target Device', bold: true, size: 22, font: 'Arial' })]
-    }),
-    new Paragraph({ spacing: { before: 0, after: 80 }, alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: TARGET_IP + ':' + TARGET_PORT, size: 24, font: 'Courier New', color: COLOURS.header })]
-    }),
-    new Paragraph({ spacing: { before: 240, after: 80 }, alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: 'Organisation:  ' + ORGANISATION, size: 22, font: 'Arial' })]
-    }),
-    new Paragraph({ spacing: { before: 60, after: 80 }, alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: 'Assessor:  ' + ASSESSOR, size: 22, font: 'Arial' })]
-    }),
-    new Paragraph({ spacing: { before: 60, after: 400 }, alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: 'Date:  ' + DATE_STR, size: 22, font: 'Arial' })]
-    }),
-    hr(),
-    // Findings summary boxes
-    new Paragraph({ spacing: { before: 400, after: 200 }, alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: 'FINDINGS SUMMARY', bold: true, size: 24, font: 'Arial', color: COLOURS.header })]
-    }),
-    new Table({
-      width: { size: W, type: WidthType.DXA },
-      columnWidths: [W/4, W/4, W/4, W/4],
-      rows: [
-        new TableRow({ children: [
-          new TableCell({
-            width: { size: W/4, type: WidthType.DXA },
-            borders: cellBorder(COLOURS.border),
-            shading: { fill: COLOURS.Critical, type: ShadingType.CLEAR },
-            margins: { top: 160, bottom: 160, left: 120, right: 120 },
-            children: [
-              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: String(critCount), bold: true, size: 52, color: 'FFFFFF', font: 'Arial' })] }),
-              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: 'CRITICAL', bold: true, size: 20, color: 'FFFFFF', font: 'Arial' })] }),
-            ]
-          }),
-          new TableCell({
-            width: { size: W/4, type: WidthType.DXA },
-            borders: cellBorder(COLOURS.border),
-            shading: { fill: COLOURS.High, type: ShadingType.CLEAR },
-            margins: { top: 160, bottom: 160, left: 120, right: 120 },
-            children: [
-              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: String(highCount), bold: true, size: 52, color: 'FFFFFF', font: 'Arial' })] }),
-              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: 'HIGH', bold: true, size: 20, color: 'FFFFFF', font: 'Arial' })] }),
-            ]
-          }),
-          new TableCell({
-            width: { size: W/4, type: WidthType.DXA },
-            borders: cellBorder(COLOURS.border),
-            shading: { fill: COLOURS.Medium, type: ShadingType.CLEAR },
-            margins: { top: 160, bottom: 160, left: 120, right: 120 },
-            children: [
-              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: String(medCount), bold: true, size: 52, color: 'FFFFFF', font: 'Arial' })] }),
-              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: 'MEDIUM', bold: true, size: 20, color: 'FFFFFF', font: 'Arial' })] }),
-            ]
-          }),
-          new TableCell({
-            width: { size: W/4, type: WidthType.DXA },
-            borders: cellBorder(COLOURS.border),
-            shading: { fill: '888888', type: ShadingType.CLEAR },
-            margins: { top: 160, bottom: 160, left: 120, right: 120 },
-            children: [
-              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: String(findings.length), bold: true, size: 52, color: 'FFFFFF', font: 'Arial' })] }),
-              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: 'TOTAL', bold: true, size: 20, color: 'FFFFFF', font: 'Arial' })] }),
-            ]
-          }),
-        ]})
-      ]
-    }),
-    new Paragraph({ spacing: { before: 800, after: 0 }, children: [new PageBreak()] }),
-  ];
-}
-
-// -- Main doc assembly -----------------------------------------------------
-const coverChildren   = buildCoverPage(FINDINGS);
-const summaryChildren = [
-  sectionHeading('1. Executive Summary'),
-  para(
-    'This report presents the results of a Modbus protocol security assessment ' +
-    'conducted against the device at ' + TARGET_IP + ':' + TARGET_PORT + '. ' +
-    'The assessment was performed using ModTester (github.com/sfl0r3nz05/ModTester) ' +
-    'integrated with Metasploit Framework SCADA auxiliary modules. ' +
-    'All testing was conducted in a controlled environment on ' + DATE_STR + '.'
-  ),
-  para(
-    'Modbus is a protocol designed in 1979 without authentication, encryption, ' +
-    'or access control. The findings in this report are therefore expected for ' +
-    'any standard Modbus implementation and represent the inherent risk of ' +
-    'operating this protocol in its default configuration on a TCP network. ' +
-    'They are documented here to support risk-based remediation decisions.'
-  ),
-  para(
-    FINDINGS.length + ' findings were identified. ' +
-    FINDINGS.filter(f => f.cvss_rating === 'Critical').length + ' are rated Critical (CVSS >= 9.0), ' +
-    FINDINGS.filter(f => f.cvss_rating === 'High').length + ' are rated High, and ' +
-    FINDINGS.filter(f => f.cvss_rating === 'Medium').length + ' are rated Medium. ' +
-    'No CVE identifiers are assigned as these are protocol-level design weaknesses; ' +
-    'findings are mapped to CWE and IEC/ISA 62443 Security Requirements instead.'
-  ),
-  new Paragraph({ spacing: { before: 200, after: 200 }, children: [] }),
-  sectionHeading('2. Assessment Scope'),
-  new Table({
-    width: { size: W, type: WidthType.DXA },
-    columnWidths: [2800, 6560],
-    rows: [
-      new TableRow({ children: [ hdrCell('Parameter', 2800), hdrCell('Value', 6560) ] }),
-      new TableRow({ children: [ dataCell('Target IP', 2800, { fill: COLOURS.altRow }), dataCell(TARGET_IP, 6560, { fill: COLOURS.altRow }) ] }),
-      new TableRow({ children: [ dataCell('Target Port', 2800), dataCell(TARGET_PORT + ' / TCP (Modbus/TCP)', 6560) ] }),
-      new TableRow({ children: [ dataCell('Protocol', 2800, { fill: COLOURS.altRow }), dataCell('Modbus/TCP (MBAP framing)', 6560, { fill: COLOURS.altRow }) ] }),
-      new TableRow({ children: [ dataCell('Assessment Date', 2800), dataCell(DATE_STR, 6560) ] }),
-      new TableRow({ children: [ dataCell('Assessor', 2800, { fill: COLOURS.altRow }), dataCell(ASSESSOR, 6560, { fill: COLOURS.altRow }) ] }),
-      new TableRow({ children: [ dataCell('Tool', 2800), dataCell('ModTester v1.1 + Metasploit Framework 6.4', 6560) ] }),
-      new TableRow({ children: [ dataCell('Organisation', 2800, { fill: COLOURS.altRow }), dataCell(ORGANISATION, 6560, { fill: COLOURS.altRow }) ] }),
-    ]
-  }),
-  new Paragraph({ spacing: { before: 200, after: 200 }, children: [] }),
-  sectionHeading('3. Standardization Framework'),
-  para('Findings are scored and referenced using the following standards, enabling comparison with existing vulnerability databases and compliance frameworks without requiring CVE assignment:'),
-  para('CVSS v3.1: Base Score computed from Attack Vector, Complexity, Privileges Required, User Interaction, Scope, and CIA Impact. Scores range 0.0-10.0 (Critical >= 9.0, High >= 7.0, Medium >= 4.0).', { italics: false }),
-  para('CWE (Common Weakness Enumeration): Classifies the underlying software/design weakness (e.g. CWE-306 Missing Authentication). Maintained by MITRE.'),
-  para('IEC/ISA 62443: The OT security standard. Security Requirements (SR) referenced here define the security capability that the device fails to meet at Security Level 1.'),
-  new Paragraph({ spacing: { before: 200, after: 200 }, children: [] }),
-  sectionHeading('4. Findings Summary'),
-  buildSummaryTable(FINDINGS),
-  new Paragraph({ spacing: { before: 200, after: 0 }, children: [new PageBreak()] }),
-];
-
-const findingChildren = [
-  sectionHeading('5. Detailed Findings'),
-  ...FINDINGS.flatMap(f => buildFindingBlock(f)),
-];
-
-const appendixChildren = [
-  sectionHeading('6. Methodology'),
-  para('Phase 1 — Discovery: modbusdetect, portDiscover, discover'),
-  para('Phase 2 — Fingerprinting: modbus_banner_grabbing (FC43)'),
-  para('Phase 3 — Enumeration: modbus_findunitid, uid (UID brute-force)'),
-  para('Phase 4 — Register Read: coilDiscover, discreteInputDiscover, holdingRegisterDiscover, inputRegisterDiscover, getfunc'),
-  para('Phase 5 — Write Exploitation: writeSingleCoils, writeSingleRegister, writeSingleCoilsID, writeSingleRegisterID, modbusclient (FC05/06/15/16)'),
-  para('Phase 6 — Denial of Service: floodingAttack'),
-  new Paragraph({ spacing: { before: 240, after: 120 }, children: [] }),
-  sectionHeading('7. References'),
-  para('Modbus Application Protocol Specification v1.1b3 — modbus.org'),
-  para('IEC 62443-3-3:2013 — System security requirements and security levels'),
-  para('MITRE CWE — https://cwe.mitre.org'),
-  para('CVSS v3.1 Specification — https://www.first.org/cvss/v3.1/specification-document'),
-  para('CISA ICS Advisories — https://www.cisa.gov/ics-advisories'),
-  para('Pymodbus — https://github.com/pymodbus-dev/pymodbus'),
-  para('ModTester — https://github.com/sfl0r3nz05/ModTester'),
-  para('Metasploit SCADA Modules — https://github.com/rapid7/metasploit-framework/tree/master/modules/auxiliary/scanner/scada'),
-  para('Generated by ModTester ReportGenerator — ' + TS_STR, { italics: true, size: 16, color: '888888' }),
-];
-
-const doc = new Document({
-  styles: {
-    default: { document: { run: { font: 'Arial', size: 20 } } },
-    paragraphStyles: [
-      { id: 'Heading1', name: 'Heading 1', basedOn: 'Normal', next: 'Normal', quickFormat: true,
-        run: { size: 28, bold: true, font: 'Arial', color: '1F4E79' },
-        paragraph: { spacing: { before: 320, after: 160 }, outlineLevel: 0 } },
-      { id: 'Heading2', name: 'Heading 2', basedOn: 'Normal', next: 'Normal', quickFormat: true,
-        run: { size: 22, bold: true, font: 'Arial', color: '2E4057' },
-        paragraph: { spacing: { before: 240, after: 100 }, outlineLevel: 1 } },
-    ]
-  },
-  sections: [{
-    properties: {
-      page: {
-        size: { width: 11906, height: 16838 },
-        margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 }
-      }
-    },
-    children: [
-      ...coverChildren,
-      ...summaryChildren,
-      ...findingChildren,
-      ...appendixChildren,
-    ]
-  }]
-});
-
-Packer.toBuffer(doc).then(buf => {
-  fs.writeFileSync(OUT_PATH, buf);
-  console.log('REPORT_OK:' + OUT_PATH);
-}).catch(err => {
-  console.error('REPORT_ERR:' + err.message);
-  process.exit(1);
-});
-"""
-
-    # Write JS to temp file and run it
-    fd, js_path = tempfile.mkstemp(suffix=".js", prefix="modtester_report_")
     try:
-        with os.fdopen(fd, "wb") as f:
-            # Encode to bytes for Python 2/3 compatibility
-            if isinstance(js_script, type(u'')):
-                f.write(js_script.encode('utf-8'))
-            else:
-                f.write(js_script.encode('utf-8') if hasattr(js_script, 'encode') else js_script)
-
-        # Resolve global npm root so require('docx') works from a /tmp script
-        try:
-            npm_root_proc = subprocess.Popen(
-                ["npm", "root", "-g"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            npm_root = npm_root_proc.communicate()[0].decode("utf-8", errors="replace").strip()
-        except OSError:
-            npm_root = ""
-
-        node_env = os.environ.copy()
-        if npm_root:
-            existing = node_env.get("NODE_PATH", "")
-            node_env["NODE_PATH"] = (npm_root + os.pathsep + existing).rstrip(os.pathsep)
-
-        result = subprocess.Popen(
-            ["node", js_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=node_env,
-        )
-        stdout, stderr = result.communicate()
-        stdout = stdout.decode("utf-8", errors="replace")
-        stderr = stderr.decode("utf-8", errors="replace")
-    finally:
-        try:
-            os.unlink(js_path)
-        except Exception:
-            pass
-
-    # Always surface Node output so failures are visible
-    if stderr.strip():
-        print("[Report] Node stderr: {}".format(stderr.strip()))
-    if stdout.strip() and "REPORT_OK:" not in stdout:
-        print("[Report] Node stdout: {}".format(stdout.strip()))
-
-    if "REPORT_OK:" in stdout:
-        path = stdout.split("REPORT_OK:")[1].strip()
-        print("[Report] Generated: {}".format(path))
-        return path
-    else:
-        print("[Report] ERROR: docx not generated.")
-        if not stderr.strip() and not stdout.strip():
-            print("[Report] Node produced no output - check 'node' and 'npm' are on PATH.")
-            print("[Report] Test with: node -e \"require('docx'); console.log('OK')\"")
+        _write_docx_pure(target_ip, port, findings, assessor, organisation, report_path)
+        print("[Report] Generated: {}".format(report_path))
+        return report_path
+    except Exception as e:
+        print("[Report] ERROR: {}".format(e))
+        import traceback
+        traceback.print_exc()
         return None
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # CLI entry point
-# ===========================================================================
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import sys
@@ -882,9 +576,8 @@ if __name__ == "__main__":
 
     args = sys.argv[1:]
     if not args or "--help" in args:
-        print("Usage: python ReportGenerator.py --target <ip> --port <port>")
-        print("         [--assessor <name>] [--org <organisation>]")
-        print("         [--outdir <output_dir>] [--output <report.docx>]")
+        print("Usage: python ReportGenerator.py --target <ip> [--port <port>]")
+        print("         [--assessor <name>] [--org <org>] [--outdir <dir>] [--output <file>]")
         sys.exit(0)
 
     _HERE      = os.path.dirname(os.path.abspath(__file__))
@@ -897,8 +590,7 @@ if __name__ == "__main__":
     output_dir   = _get(args, "--outdir",   OUTPUT_DIR)
     report_path  = _get(args, "--output",   None)
 
-    path = generate_report(target_ip, port, output_dir, assessor,
-                           organisation, report_path)
+    path = generate_report(target_ip, port, output_dir, assessor, organisation, report_path)
     if path:
         print("Report saved: {}".format(path))
     else:
